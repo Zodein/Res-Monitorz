@@ -1,13 +1,17 @@
+import psutil
 import flet
 import flet as ft
-import threading
-import psutil
 import time
-import pynvml
 from threading import Thread
-
 import pystray as pys
 from PIL import Image, ImageDraw
+import info as inff
+import gpu_info
+import cpu_info
+import network_info
+import disk_info
+import yaml
+
 
 update_time = 0.5
 
@@ -20,163 +24,77 @@ def create_tray_image(width=64, height=64, color1="purple", color2="black"):
     return image
 
 
-def default_text(size=30, font_family="Segoe UI", text_align="CENTER", width=100):
-    return ft.Text(size=size, font_family=font_family, text_align=text_align, width=width)
-
-
-class Info:
-    bgcolor = ft.colors.ORANGE_600
-    title = ""
-    texts = {}
-
-    def kill(self):
-        return
-
-    def get_layout(self):
-        return [ft.Text(self.title, size=15, font_family="Segoe UI", text_align="RIGHT", width=40), *self.texts.values()]
-
-    def update(self):
-        return
-
-
-class CpuInfo(Info):
-    def __init__(self, update_time=0.5):
-        self.bgcolor = ft.colors.TEAL_600
-        self.title = "CPU"
-        self.update_time = update_time
-        self.running = True
-        self.cpu_percent = 0.0
-        self.thread = Thread(target=self.cpu_update_loop)
-        self.thread.start()
-        self.texts = {}
-        for i in ["cpu_usage_text", "mem_usage_text"]:
-            self.texts[i] = default_text()
-
-    def cpu_update_loop(self):
-        while self.running:
-            self.cpu_percent = psutil.cpu_percent()
-            time.sleep(self.update_time)
-
-    def kill(self):
-        self.running = False
-        self.thread.join()
-
-    def update(self):
-        self.texts["cpu_usage_text"].value = "{:02}".format(int(self.cpu_percent))
-        self.texts["mem_usage_text"].value = "{:02}".format(int(psutil.virtual_memory().percent))
-
-
-class GpuInfo(Info):
-    def __init__(self, update_time=0.5):
-        self.bgcolor = ft.colors.GREEN_600
-        self.title = "GPU"
-        self.update_time = update_time
-        self.handle = None
-        pynvml.nvmlInit()
-        if pynvml.nvmlDeviceGetCount() == 1:
-            self.gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        self.texts = {}
-        for i in ["gpu_usage_text", "gpu_mem_usage_text"]:
-            self.texts[i] = default_text()
-
-    def kill(self):
-        pynvml.nvmlShutdown()
-
-    def update(self):
-        info = pynvml.nvmlDeviceGetMemoryInfo(self.gpu_handle)
-        self.texts["gpu_usage_text"].value = "{:02}".format(pynvml.nvmlDeviceGetUtilizationRates(self.gpu_handle).gpu)
-        self.texts["gpu_mem_usage_text"].value = "{:02}".format(int(info.used / info.total * 100))
-
-
-class NetworkInfo(Info):
-    def __init__(self, update_time=0.5):
-        self.bgcolor = ft.colors.BLUE_GREY_600
-        self.title = "NET"
-        self.update_time = update_time
-        self.running = True
-        self.down = 0.0
-        self.up = 0.0
-        self.thread = Thread(target=self.network_update_loop)
-        self.thread.start()
-        self.texts = {}
-        for i in ["down_text", "up_text"]:
-            self.texts[i] = default_text()
-
-    def network_update_loop(self):
-        info = psutil.net_io_counters()
-        last = (time.time(), info.bytes_recv, info.bytes_sent)
-        while self.running:
-            info = psutil.net_io_counters()
-            info_time = time.time()
-            self.down = (info.bytes_recv - last[1]) / (info_time - last[0]) / (1024 * 1024)
-            self.up = (info.bytes_sent - last[2]) / (info_time - last[0]) / (1024 * 1024)
-            last = (info_time, info.bytes_recv, info.bytes_sent)
-            time.sleep(self.update_time)
-
-    def kill(self):
-        self.running = False
-        self.thread.join()
-
-    def update(self):
-        self.texts["down_text"].value = "{:0.2f}".format(self.down)
-        self.texts["up_text"].value = "{:0.2f}".format(self.up)
-
-
 class MainWindow:
-    page = None
-    infos: list[Info] = [info() for info in [CpuInfo, GpuInfo, NetworkInfo]]
+    config = None
+    config_file = "config.yaml"
+    infos = []
 
-    @staticmethod
-    def init(page: ft.Page):
-        MainWindow.page = page
-        MainWindow.page.title = "Res Monitorz"
-        MainWindow.page.vertical_alignment = "center"
-        MainWindow.page.window.always_on_top = True
-        MainWindow.page.window.frameless = True
-        MainWindow.page.window.maximizable = False
-        MainWindow.page.window.resizable = False
-        MainWindow.page.window.width = 240
-        MainWindow.page.window.height = 192
-        MainWindow.page.spacing = 0
-        MainWindow.page.padding = 0
-        MainWindow.page.bgcolor = ft.colors.BLUE_600
-        MainWindow.page.window.skip_task_bar = True
-        MainWindow.page.vertical_alignment = ft.MainAxisAlignment.CENTER
-        MainWindow.page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
+    def __init__(self):
+        self.options_layout = None
+        with open(self.config_file, "a+") as file:
+            pass
+        with open(self.config_file, "r+") as file:
+            self.config = yaml.safe_load(file)
+            if self.config is None:
+                self.config = {}
 
-        MainWindow.page.add(
-            *[
-                ft.WindowDragArea(
-                    ft.Container(
-                        ft.Row(
-                            info.get_layout(),
-                            alignment="center",
-                            spacing=0,
-                        ),
-                        bgcolor=info.bgcolor,
-                        height=64
-                    )
-                )
-                for info in MainWindow.infos
-            ]
-        )
+        self.infos: list[inff.Info] = [info(self.active_on_change, self.config) for info in [cpu_info.CpuInfo, gpu_info.GpuInfo]]
+        self.infos.extend(network_info.NetworkInfo(self.active_on_change, self.config, network_interface=k) for k in psutil.net_io_counters(pernic=True).keys())
+        self.infos.extend(disk_info.DiskInfo(self.active_on_change, self.config, disk=k) for k in psutil.disk_io_counters(perdisk=True).keys())
 
-        def tray_quit(icon, item):
-            tray.stop()
-            MainWindow.page.window.destroy()
+    def active_on_change(self, e, info, subinfo):
+        if info.info_id not in self.config:
+            self.config[info.info_id] = {}
+        self.config[info.info_id][subinfo.info_id] = subinfo.active = subinfo.layout.visible = e.control.value
+        self.write_config()
+        info.layout.visible = any([subinfo.active for subinfo in info.subinfos])
 
-        tray = pys.Icon("Res Monitorz", create_tray_image(), menu=pys.Menu(pys.MenuItem("Quit", tray_quit)))
-        Thread(target=tray.run).start()
+    def write_config(self):
+        with open(self.config_file, "w") as file:
+            yaml.dump(self.config, file)
 
-        thread = Thread(target=MainWindow.update_page)
-        thread.start()
+    def start(self, page: ft.Page):
+        self.page = page
+        self.page.title = "Res Monitorz"
+        self.page.vertical_alignment = "center"
+        self.page.window.always_on_top = True
+        self.page.window.frameless = True
+        self.page.window.maximizable = False
+        self.page.window.resizable = False
+        self.page.window.width = 320
+        self.page.window.height = 320
+        self.page.spacing = 0
+        self.page.padding = 0
+        self.page.bgcolor = ft.colors.WHITE10
+        self.page.window.skip_task_bar = True
+        self.page.vertical_alignment = ft.MainAxisAlignment.CENTER
+        self.page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
+        self.page.scroll = True
 
-    def update_page():
-        while MainWindow.page.loop.is_running():
-            [info.update() for info in MainWindow.infos]
-            MainWindow.page.update()
+        self.options_layout = ft.Column([info.options_layout for info in self.infos], visible=False)
+        self.info_layout = ft.WindowDragArea(ft.Column([info.layout for info in self.infos], spacing=0))
+
+        self.page.add(self.info_layout)
+        self.page.add(self.options_layout)
+
+        self.tray = pys.Icon("Res Monitorz", create_tray_image(), menu=pys.Menu(pys.MenuItem("Options", self.tray_options), pys.MenuItem("Quit", self.tray_quit)))
+        Thread(target=self.tray.run).start()
+        Thread(target=self.update_page).start()
+
+    def tray_quit(self, icon, item):
+        self.tray.stop()
+        self.page.window.destroy()
+
+    def tray_options(self, icon, item):
+        self.options_layout.visible = not self.options_layout.visible
+
+    def update_page(self):
+        while self.page.loop.is_running():
+            [info.update() for info in self.infos]
+            self.page.update()
             time.sleep(update_time)
 
 
-flet.app(target=MainWindow.init)
-[info.kill() for info in MainWindow.infos]
+main_window = MainWindow()
+flet.app(target=main_window.start)
+[info.kill() for info in main_window.infos]
